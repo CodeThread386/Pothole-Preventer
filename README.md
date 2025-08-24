@@ -5,7 +5,7 @@
 ![OpenCV](https://img.shields.io/badge/OpenCV-Computer%20Vision-green?logo=opencv)
 ![Status](https://img.shields.io/badge/Status-Active-success)
 
-
+<br>
 
 ## 📌 Overview
 
@@ -14,7 +14,7 @@ It uses **YOLOv8 segmentation** to detect potholes and road damage, overlays a *
 
 The system works with both **pre-recorded videos** and **live camera feeds**.
 
-
+<br>
 
 ## 🚀 Features
 
@@ -23,7 +23,7 @@ The system works with both **pre-recorded videos** and **live camera feeds**.
 - ✅ **Dynamic path planning** (minimizes total damage)
 - ✅ **Smoothed path rendering** (no jerky swerving, suitable for real cars)
 
-
+<br>
 
 ## ⚙️ Instructions for Local Execution
 
@@ -47,6 +47,7 @@ pip install ultralytics opencv-python numpy matplotlib
 python app.py
 ```
 
+<br>
 
 ## ▶️ Usage
 
@@ -64,6 +65,7 @@ VIDEO_SOURCE = "your video source path"
 VIDEO_SOURCE = 0
 ```
 
+<br>
 
 ## 📊 How It Works
 
@@ -73,7 +75,7 @@ VIDEO_SOURCE = 0
 4. **Path Smoothing** – The path is filtered to remove jerky swerves, producing a realistic drivable line.
 5. **Visualization** – Heatmap and the recommended driving path (yellow) are overlaid on the video.
 
-
+<br>
 
 ## 🔮 Future Improvements
 
