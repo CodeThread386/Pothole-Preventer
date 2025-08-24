@@ -6,7 +6,6 @@
 ![Status](https://img.shields.io/badge/Status-Active-success)
 
 <br>
-
 ## 📌 Overview
 
 **Pothole Preventer** is a project that detects road damage in real time and suggests the **smoothest and safest path** for a vehicle to follow.  
@@ -15,7 +14,6 @@ It uses **YOLOv8 segmentation** to detect potholes and road damage, overlays a *
 The system works with both **pre-recorded videos** and **live camera feeds**.
 
 <br>
-
 ## 🚀 Features
 
 - ✅ **YOLOv8 segmentation** for accurate pothole/damage detection
@@ -24,7 +22,6 @@ The system works with both **pre-recorded videos** and **live camera feeds**.
 - ✅ **Smoothed path rendering** (no jerky swerving, suitable for real cars)
 
 <br>
-
 ## ⚙️ Instructions for Local Execution
 
 ### 1. Clone the Repository
@@ -48,7 +45,6 @@ python app.py
 ```
 
 <br>
-
 ## ▶️ Usage
 
 Open app.py and make modifications in line 11
@@ -66,7 +62,6 @@ VIDEO_SOURCE = 0
 ```
 
 <br>
-
 ## 📊 How It Works
 
 1. **Segmentation** – YOLOv8 detects potholes/damage and masks them.
@@ -76,7 +71,6 @@ VIDEO_SOURCE = 0
 5. **Visualization** – Heatmap and the recommended driving path (yellow) are overlaid on the video.
 
 <br>
-
 ## 🔮 Future Improvements
 
 - 📍 GPS integration for real-world navigation
