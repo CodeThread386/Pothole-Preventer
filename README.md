@@ -5,16 +5,16 @@
 ![OpenCV](https://img.shields.io/badge/OpenCV-Computer%20Vision-green?logo=opencv)
 ![Status](https://img.shields.io/badge/Status-Active-success)
 
----
+
 
 ## 📌 Overview
 
-**Pothole Preventer** is a computer vision project that detects road damage in real-time and suggests the **smoothest and safest path** for a vehicle to follow.  
+**Pothole Preventer** is a project that detects road damage in real time and suggests the **smoothest and safest path** for a vehicle to follow.  
 It uses **YOLOv8 segmentation** to detect potholes and road damage, overlays a **heatmap of road conditions**, and computes an **optimal driving path** by minimizing cumulative damage along the route.
 
 The system works with both **pre-recorded videos** and **live camera feeds**.
 
----
+
 
 ## 🚀 Features
 
@@ -22,9 +22,8 @@ The system works with both **pre-recorded videos** and **live camera feeds**.
 - ✅ **Real-time heatmap generation** showing road quality
 - ✅ **Dynamic path planning** (minimizes total damage)
 - ✅ **Smoothed path rendering** (no jerky swerving, suitable for real cars)
-- ✅ Works with both **video files** and **live camera input**
 
----
+
 
 ## ⚙️ Instructions for Local Execution
 
@@ -43,15 +42,11 @@ Install the required Python packages:
 pip install ultralytics opencv-python numpy matplotlib
 ```
 
-### 3. Change Directory 
-```bash
-cd Pothole-Preventer
-```
-
-### 4. Begin Execution 
+### 3. Begin Execution 
 ```bash
 python app.py
 ```
+
 
 ## ▶️ Usage
 
@@ -59,19 +54,16 @@ Open app.py and make modifications in line 11
 
 ### Run on a Video File
 
-set 
 ```bash
 VIDEO_SOURCE = "your video source path"
 ```
 
 ### Run on Live Camera
 
-set 
 ```bash
 VIDEO_SOURCE = 0
 ```
 
----
 
 ## 📊 How It Works
 
@@ -81,7 +73,7 @@ VIDEO_SOURCE = 0
 4. **Path Smoothing** – The path is filtered to remove jerky swerves, producing a realistic drivable line.
 5. **Visualization** – Heatmap and the recommended driving path (yellow) are overlaid on the video.
 
----
+
 
 ## 🔮 Future Improvements
 
