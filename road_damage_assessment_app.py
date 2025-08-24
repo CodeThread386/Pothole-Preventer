@@ -338,4 +338,4 @@ while True:
     # don't block if camera; just continue
 
 cap.release()
-cv2.destroyAllWindows()
+cv2.destroyAllWindows() 
