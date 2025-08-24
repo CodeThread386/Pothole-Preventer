@@ -11,7 +11,7 @@ https://github.com/FarzadNekouee/YOLOv8_Pothole_Segmentation_Road_Damage_Assessm
 The pretrained model from that repository (`model/best.pt`) is used here to detect potholes and damage masks, which feed into the heatmap and path-planning logic.  
 A big thanks to the author for releasing this model — it made the pothole detection pipeline much easier to integrate.
 
----
+
 
 ## 🔗 Third-Party Components
 
@@ -31,4 +31,3 @@ A big thanks to the author for releasing this model — it made the pothole dete
 - **PyTorch** — model runtime backend  
 - **SciPy** — interpolation utilities  
 
----
