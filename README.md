@@ -12,7 +12,7 @@
 It uses **YOLOv8 segmentation** to detect potholes and road damage, overlays a **heatmap of road conditions**, and computes an **optimal driving path** by minimizing cumulative damage along the route.
 
 The system works with both **pre-recorded videos** and **live camera feeds**.
-<br>
+<br> <br>
 
 ## 🚀 Features
 
