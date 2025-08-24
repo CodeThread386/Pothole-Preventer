@@ -8,7 +8,7 @@ import time
 
 # ---------------- CONFIG (tweak these) ----------------
 MODEL_PATH = "model/best.pt"     # segmentation model
-VIDEO_SOURCE = "sample_video.mp4"  # 0 for webcam
+VIDEO_SOURCE = "sample_video.mp4"  # 0 for camera
 IMG_SZ = 640
 CONF = 0.25
 

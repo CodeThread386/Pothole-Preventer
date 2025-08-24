@@ -1,9 +1,8 @@
-# 🛣️ Pothole Preventer – Smart Path Planning with YOLO Segmentation
+# 🛣️ Pothole Preventer – Smart Path Planning for Accident Prevention
 
 ![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python)
 ![YOLOv8](https://img.shields.io/badge/YOLOv8-Segmentation-orange?logo=ultralytics)
 ![OpenCV](https://img.shields.io/badge/OpenCV-Computer%20Vision-green?logo=opencv)
-![License](https://img.shields.io/badge/License-MIT-yellow)
 ![Status](https://img.shields.io/badge/Status-Active-success)
 
 ---
@@ -27,7 +26,7 @@ The system works with both **pre-recorded videos** and **live camera feeds**.
 
 ---
 
-## ⚙️ Installation
+## ⚙️ Instructions for Local Execution
 
 ### 1. Clone the Repository
 
@@ -44,20 +43,32 @@ Install the required Python packages:
 pip install ultralytics opencv-python numpy matplotlib
 ```
 
----
+### 3. Change Directory 
+```bash
+cd Pothole-Preventer
+```
+
+### 4. Begin Execution 
+```bash
+python app.py
+```
 
 ## ▶️ Usage
 
+Open app.py and make modifications in line 11
+
 ### Run on a Video File
 
+set 
 ```bash
-python main.py --input path/to/video.mp4
+VIDEO_SOURCE = "your video source path"
 ```
 
 ### Run on Live Camera
 
+set 
 ```bash
-python main.py --live
+VIDEO_SOURCE = 0
 ```
 
 ---
@@ -77,4 +88,4 @@ python main.py --live
 - 📍 GPS integration for real-world navigation
 - 🚗 Lane-aware planning
 - 🧠 Adaptive smoothing based on vehicle dynamics
-- 📱 Mobile app deployment (dashcam integration)
+- 📱 Android auto and Apple car app deployment with dashcam integration
