@@ -8,74 +8,78 @@ import time
 
 # ---------------- CONFIG (tweak these) ----------------
 MODEL_PATH = "model/best.pt"     # your segmentation model
-VIDEO_SOURCE = "sample_video.mp4"                 # 0 for webcam, or "sample_video.mp4"
+VIDEO_SOURCE = "sample_video.mp4"  # or 0 for webcam
 IMG_SZ = 640
 CONF = 0.25
-FPS = 20.0
 
-num_parts = 5      # columns
-num_rows = 4       # rows
-DEQUE_LEN = 20     # smoothing of percentage per tile
+num_parts = 5
+num_rows = 4
+DEQUE_LEN = 20
 
-# Online planning / smoothness
-HORIZON = 10               # MPC horizon in frames (how far ahead to plan)
-DISCOUNT = 0.98            # discount factor for future cost (makes planning short-sighted)
-TURN_PENALTY = 0.5         # penalty for lateral move (same as original)
-CURV_PENALTY_FACTOR = 0.7  # curvature penalty factor (same as original)
-EMA_HEAT_ALPHA = 0.25      # heatmap EMA smoothing (lower -> smoother)
-EMA_PATH_ALPHA = 0.25      # path x-coord EMA smoothing (lower -> smoother)
-MAX_COL_CHANGE_PER_FRAME = 1  # allowed column change per frame (vehicle constraint)
+# MPC / smoothing
+HORIZON = 10
+DISCOUNT = 0.98
+TURN_PENALTY = 0.5
+CURV_PENALTY_FACTOR = 0.7
+EMA_HEAT_ALPHA = 0.25
+EMA_PATH_ALPHA = 0.25
+MAX_COL_CHANGE_PER_FRAME = 1    # keep car-feasible (discrete columns per frame)
 WARMUP = True
+
+# Speed estimation and dynamic ROI
+REAL_DISTANCE_M = 10.0
+LINE_FAR_FRAC = 0.30
+LINE_NEAR_FRAC = 0.70
+SPEED_TO_ROI_MAP = [
+    (20.0, 0.25),
+    (60.0, 0.40),
+    (9999.0, 0.60)
+]
+
+# Danger avoidance weight (higher -> avoid danger more aggressively)
+DANGER_WEIGHT = 1.2   # tune between 0.0 (ignore) and ~2.0
+# row weighting for danger scoring (nearer rows matter more)
+ROW_WEIGHTS = np.linspace(1.5, 0.6, num_rows)  # length num_rows
 # -----------------------------------------------------
 
-# Load model and set device
+# load model
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = YOLO(MODEL_PATH)
 try:
     model.to(device)
 except Exception:
-    pass  # some ultralytics builds accept device in predict
+    pass
 
-# open video (file or webcam)
 cap = cv2.VideoCapture(VIDEO_SOURCE)
 if not cap.isOpened():
     raise SystemExit("Cannot open video source")
 
 frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+fps_est = cap.get(cv2.CAP_PROP_FPS) or 20.0
 if frame_w == 0 or frame_h == 0:
-    # fallback sizes for some webcams; try reading one frame
     ret, tmp = cap.read()
     if not ret:
         raise SystemExit("Cannot read frame to determine size")
     frame_h, frame_w = tmp.shape[:2]
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-# Precompute tile geometry (lower half)
 part_width = frame_w // num_parts
-row_height = (frame_h // 2) // num_rows
-lower_half_start = frame_h // 2
-
-tile_bounds = []
-tile_areas = []
-for row in range(num_rows):
-    for col in range(num_parts):
-        x_start = col * part_width
-        x_end = (col + 1) * part_width if col < num_parts - 1 else frame_w
-        y_start = lower_half_start + row * row_height
-        y_end = lower_half_start + (row + 1) * row_height if row < num_rows - 1 else frame_h
-        tile_bounds.append((row, col, x_start, x_end, y_start, y_end))
-        tile_areas.append(max(1, (y_end - y_start) * (x_end - x_start)))
 
 # smoothing structures
 damage_deques = [[deque(maxlen=DEQUE_LEN) for _ in range(num_parts)] for _ in range(num_rows)]
-ema_heatmap = None            # EMA-smoothed grid used for DP
-ema_path_x = None             # EMA-smoothed x positions for trajectory drawing
+ema_heatmap = None
+ema_path_x = None
 
-# yellow tile tracked column (initialized center)
-yellow_col = num_parts // 2
+# yellow tile (vehicle) state
+yellow_col = num_parts // 2                  # discrete column vehicle currently in (logical)
+yellow_x_pos = (yellow_col * part_width + part_width / 2.0)  # pixel x (float) for trail
+yellow_history = []                          # list of (x,y) points for trail
 
-# warm up model once to reduce first-call latency
+# display_path_cols for natural planned visualization (keeps tiles changing smoothly)
+display_path_cols = [yellow_col] * num_rows
+
+# warm up
 if WARMUP:
     dummy = np.zeros((IMG_SZ // 2, IMG_SZ // 2, 3), dtype=np.uint8)
     try:
@@ -100,41 +104,24 @@ def render_heatmap(smoothed_grid: np.ndarray, width: int, height: int) -> np.nda
     return hm
 
 def mpc_next_col(current_col, last_row_cost, horizon=HORIZON):
-    """
-    Receding-horizon DP (MPC): for given current_col and cost vector for last-row (shape: num_parts),
-    compute optimal column sequence for horizon steps minimizing discounted cumulative cost,
-    with adjacency constraint (±1). Return next column (first step).
-    """
-    # Build horizon costs: use same last_row_cost each future step with discount;
-    # this is a simple prediction strategy; you can replace with better forecast.
     costs = np.zeros((horizon, num_parts), dtype=np.float32)
     for t in range(horizon):
-        costs[t, :] = (DISCOUNT ** t) * last_row_cost  # discounted future cost
-
-    # dp[t,c] minimal cost up to time t (0-indexed) ending at column c
+        costs[t, :] = (DISCOUNT ** t) * last_row_cost
     dp = np.full((horizon, num_parts), np.inf, dtype=np.float32)
     prev = np.full((horizon, num_parts), -1, dtype=int)
-
-    # t = 0: can move from current_col to current_col or ±1?
     for c in range(num_parts):
         if abs(c - current_col) <= MAX_COL_CHANGE_PER_FRAME:
-            # allow immediate first transition within vehicle constraint
             dp[0, c] = costs[0, c]
             prev[0, c] = current_col
-
-    # subsequent times
     for t in range(1, horizon):
         for c in range(num_parts):
-            # allowed previous columns are c-1,c,c+1 (adjacent)
             best_val = np.inf
             best_p = -1
             for p in (c - 1, c, c + 1):
                 if 0 <= p < num_parts:
-                    # penalize lateral change relative to prev step
                     move = abs(c - p)
                     turn_pen = TURN_PENALTY if move != 0 else 0.0
                     val = dp[t - 1, p] + costs[t, c] + turn_pen
-                    # curvature penalty: if t>1 we can approximate by second difference if prev prev exists
                     if t > 1 and prev[t - 1, p] != -1:
                         curvature = abs(p - prev[t - 1, p])
                         val += curvature * CURV_PENALTY_FACTOR
@@ -143,31 +130,82 @@ def mpc_next_col(current_col, last_row_cost, horizon=HORIZON):
                         best_p = p
             dp[t, c] = best_val
             prev[t, c] = best_p
-
-    # reconstruct best end column and backtrack to get sequence
     end_col = int(np.argmin(dp[horizon - 1, :]))
     seq = [0] * horizon
     seq[horizon - 1] = end_col
     for t in range(horizon - 1, 0, -1):
         seq[t - 1] = int(prev[t, seq[t]])
-
-    # the first step (t=0) is seq[0] (reachable within MAX_COL_CHANGE_PER_FRAME)
     return seq[0], seq
 
-# Main live loop
+# optical flow storage
+prev_roi_gray = None
+
+def estimate_speed_from_flow(prev_gray, cur_gray, roi_h):
+    if prev_gray is None or cur_gray is None or prev_gray.shape != cur_gray.shape:
+        return 0.0
+    y_far = int(roi_h * LINE_FAR_FRAC)
+    y_near = int(roi_h * LINE_NEAR_FRAC)
+    pixel_dist = max(1.0, abs(y_near - y_far))
+    flow = cv2.calcOpticalFlowFarneback(prev_gray, cur_gray, None,
+                                        pyr_scale=0.5, levels=3, winsize=15,
+                                        iterations=2, poly_n=5, poly_sigma=1.2, flags=0)
+    band = flow[y_far:y_near, :, 1]
+    if band.size == 0:
+        return 0.0
+    mean_v_pixels_per_frame = np.nanmean(band)
+    v_pixels_per_s = abs(mean_v_pixels_per_frame) * (fps_est or 20.0)
+    if v_pixels_per_s < 1e-3:
+        return 0.0
+    time_to_cross = pixel_dist / v_pixels_per_s
+    if time_to_cross <= 0:
+        return 0.0
+    speed_m_s = REAL_DISTANCE_M / time_to_cross
+    return float(speed_m_s * 3.6)
+
+def choose_roi_fraction_for_speed(speed_kmph):
+    for thresh, frac in SPEED_TO_ROI_MAP:
+        if speed_kmph < thresh:
+            return frac
+    return SPEED_TO_ROI_MAP[-1][1]
+
 print("Starting live processing. Press 'q' to quit.")
 prev_time = time.time()
 frame_idx = 0
+speed_kmph = 0.0
+
 while True:
     ret, frame = cap.read()
     if not ret:
         break
     frame_idx += 1
 
-    # ROI = lower half
-    roi = frame[lower_half_start:frame_h, :]
+    # Bootstrap ROI for flow estimate
+    if prev_roi_gray is None:
+        roi_frac = 0.40
+    else:
+        roi_frac = 0.40
 
-    # Run YOLO once on ROI for segmentation masks
+    roi_h_tmp = int(frame_h * roi_frac)
+    roi_top_tmp = max(0, frame_h - roi_h_tmp)
+    roi_tmp = frame[roi_top_tmp:frame_h, :]
+    cur_tmp_gray = cv2.cvtColor(roi_tmp, cv2.COLOR_BGR2GRAY)
+
+    if prev_roi_gray is not None and prev_roi_gray.shape == cur_tmp_gray.shape:
+        speed_kmph = estimate_speed_from_flow(prev_roi_gray, cur_tmp_gray, cur_tmp_gray.shape[0])
+    else:
+        speed_kmph = 0.0
+
+    roi_frac = choose_roi_fraction_for_speed(speed_kmph)
+    roi_height = int(frame_h * roi_frac)
+    roi_top = max(0, frame_h - roi_height)
+    roi = frame[roi_top:frame_h, :]
+
+    cur_roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    if prev_roi_gray is not None and prev_roi_gray.shape == cur_roi_gray.shape:
+        speed_kmph = estimate_speed_from_flow(prev_roi_gray, cur_roi_gray, cur_roi_gray.shape[0])
+    prev_roi_gray = cur_roi_gray.copy()
+
+    # segmentation on ROI
     try:
         results = model.predict(source=roi, imgsz=IMG_SZ, conf=CONF, device=device, verbose=False)
     except TypeError:
@@ -175,7 +213,10 @@ while True:
     except Exception:
         results = []
 
-    # accumulate mask pixels per tile
+    # recompute row_height because ROI changed
+    row_height = max(1, roi.shape[0] // num_rows)
+
+    # accumulate mask pixels per cell
     tile_mask_pixels = np.zeros((num_rows, num_parts), dtype=np.float32)
     if results and len(results) > 0 and getattr(results[0], "masks", None) is not None:
         try:
@@ -185,12 +226,10 @@ while True:
 
         roi_h, roi_w = roi.shape[:2]
         for mask in masks_np:
-            # threshold and resize to roi if necessary
             if mask.shape[0] != roi_h or mask.shape[1] != roi_w:
                 mask_r = cv2.resize((mask > 0).astype(np.uint8), (roi_w, roi_h), interpolation=cv2.INTER_NEAREST)
             else:
                 mask_r = (mask > 0).astype(np.uint8)
-
             for r in range(num_rows):
                 y0 = r * row_height
                 y1 = (r + 1) * row_height if r < num_rows - 1 else roi_h
@@ -208,29 +247,31 @@ while True:
                         continue
                     tile_mask_pixels[r, c] += int(cell_mask.sum())
 
-    # convert to percentage and append to deques (preserve original deque smoothing)
+    # convert to percentages and update deques
     current_grid = np.zeros((num_rows, num_parts), dtype=np.float32)
-    for idx, (row, col, x0, x1, y0, y1) in enumerate(tile_bounds):
-        area = tile_areas[idx]
-        count = tile_mask_pixels[row, col]
-        pct = (count / float(area)) * 100.0 if area > 0 else 0.0
-        damage_deques[row][col].append(pct)
-        current_grid[row, col] = float(np.mean(damage_deques[row][col]))
+    for r in range(num_rows):
+        for c in range(num_parts):
+            y0 = r * row_height
+            y1 = (r + 1) * row_height if r < num_rows - 1 else roi.shape[0]
+            tile_w = ((c + 1) * part_width if c < num_parts - 1 else roi.shape[1]) - (c * part_width)
+            tile_h = y1 - y0
+            area = max(1, tile_w * tile_h)
+            cnt = tile_mask_pixels[r, c]
+            pct = (cnt / float(area)) * 100.0 if area > 0 else 0.0
+            damage_deques[r][c].append(pct)
+            current_grid[r, c] = float(np.mean(damage_deques[r][c]))
 
-    # EMA heatmap smoothing for temporal stability
+    # EMA heatmap smoothing
     if ema_heatmap is None:
         ema_heatmap = current_grid.copy()
     else:
         ema_heatmap = EMA_HEAT_ALPHA * current_grid + (1.0 - EMA_HEAT_ALPHA) * ema_heatmap
+    smoothed_damages = ema_heatmap
 
-    smoothed_damages = ema_heatmap  # use this for DP & visualization
-
-    # Build per-row DP path across rows (like original) to compute path positions across rows
-    # We'll compute the 'path' column per row minimizing smoothed damages (identical to original)
+    # DP across rows (same path logic)
     dp_rows = np.full((num_rows, num_parts), np.inf, dtype=np.float32)
     prev_rows = np.full((num_rows, num_parts), -1, dtype=int)
     dp_rows[0, :] = smoothed_damages[0, :]
-
     for r in range(1, num_rows):
         for c in range(num_parts):
             for d in (-1, 0, 1):
@@ -248,52 +289,84 @@ while True:
                         dp_rows[r, c] = val
                         prev_rows[r, c] = p
 
-    # reconstruct per-row path (col indices)
+    # reconstruct per-row path columns
     end_col = int(np.argmin(dp_rows[num_rows - 1, :]))
     path_cols = [0] * num_rows
     path_cols[-1] = end_col
     for r in range(num_rows - 1, 0, -1):
         path_cols[r - 1] = int(prev_rows[r, path_cols[r]])
 
-    # compute center x for each row from path_cols (float)
-    x_centers = np.array([(col * part_width + part_width / 2.0) for col in path_cols], dtype=np.float32)
-    y_centers = np.array([lower_half_start + r * row_height + row_height / 2.0 for r in range(num_rows)], dtype=np.float32)
+    # compute danger scores per column (row-weighted sum)
+    # higher value -> more pothole danger in that column ahead
+    danger_scores = np.sum(smoothed_damages * ROW_WEIGHTS[:, None], axis=0)  # shape (num_parts,)
 
-    # EMA on path x positions for lateral smoothing over time
-    if ema_path_x is None:
-        ema_path_x = x_centers.copy()
-    else:
-        ema_path_x = EMA_PATH_ALPHA * x_centers + (1.0 - EMA_PATH_ALPHA) * ema_path_x
-
-    # Use MPC on last-row smoothed damages to get next yellow column suggestion
+    # Last-row cost (as previous) -> we'll bias it with danger scores
     last_row_cost = smoothed_damages[num_rows - 1, :]
-    recommended_col, planned_seq = mpc_next_col(yellow_col, last_row_cost, horizon=HORIZON)
 
-    # enforce vehicle discrete move constraint: change at most MAX_COL_CHANGE_PER_FRAME
-    desired_move = np.clip(recommended_col - yellow_col, -MAX_COL_CHANGE_PER_FRAME, MAX_COL_CHANGE_PER_FRAME)
-    yellow_col = int(yellow_col + desired_move)
+    # Danger-aware modified last-row cost for MPC (optionally used by planner)
+    danger_modified_cost = last_row_cost + DANGER_WEIGHT * danger_scores
 
-    # Compose frame for visualization
+    # Use MPC (unchanged inputs if you want) but here we use danger_modified_cost so planner avoids danger columns
+    recommended_col, planned_seq = mpc_next_col(yellow_col, danger_modified_cost, horizon=HORIZON)
+
+    # Now decide the actual discrete next column for the vehicle.
+    # Candidate move MUST be within +/- MAX_COL_CHANGE_PER_FRAME for safety.
+    # We'll consider feasible candidates and choose the one with lowest combined danger+cost.
+    feasible = []
+    for cand in range(max(0, yellow_col - MAX_COL_CHANGE_PER_FRAME), min(num_parts, yellow_col + MAX_COL_CHANGE_PER_FRAME + 1)):
+        # score combines danger (ahead) and the dp cost for that column (last_row cost) and slight turn penalty
+        score = danger_scores[cand] * DANGER_WEIGHT + last_row_cost[cand] + 0.2 * abs(cand - yellow_col)
+        feasible.append((score, cand))
+    # choose best feasible
+    feasible.sort()
+    chosen_score, chosen_col = feasible[0]
+
+    # apply sudden (non-smooth) discrete move to chosen_col (but still restricted to +/- MAX_COL_CHANGE_PER_FRAME)
+    yellow_col = chosen_col
+
+    # set yellow_x_pos to be exact center of yellow_col (no smooth transition)
+    yellow_x_pos = yellow_col * part_width + part_width / 2.0
+
+    # append to history (visual trail)
+    yellow_history.append((int(yellow_x_pos), frame_h - 4))
+    if len(yellow_history) > 200:
+        yellow_history.pop(0)
+
+    # update display_path_cols gradually to keep planned visuals natural (±1 per frame)
+    for r in range(num_rows):
+        desired = int(path_cols[r])
+        cur = int(display_path_cols[r])
+        if desired > cur:
+            display_path_cols[r] = cur + 1
+        elif desired < cur:
+            display_path_cols[r] = cur - 1
+        else:
+            display_path_cols[r] = cur
+
+    # Compose visualization (heatmap in lower half preserved)
     processed = frame.copy()
-    heatmap_color = render_heatmap(smoothed_damages, frame_w, frame_h - lower_half_start)
+    heatmap_color = render_heatmap(smoothed_damages, frame_w, frame_h - (frame_h // 2))
     heat_alpha = 0.45
+    lower_half_start = frame_h // 2
     processed[lower_half_start:frame_h, 0:frame_w] = cv2.addWeighted(
         processed[lower_half_start:frame_h, 0:frame_w], 1 - heat_alpha,
         heatmap_color, heat_alpha, 0
     )
 
-    # Draw grid overlays and text
+    # Draw grid overlays (visual grid anchored to lower half) — uses display_path_cols for planned tiles
+    vis_row_height = (frame_h // 2) // num_rows
+    vis_lower_half_start = frame_h // 2
     for r in range(num_rows):
         for c in range(num_parts):
-            x_start = c * part_width
-            x_end = (c + 1) * part_width if c < num_parts - 1 else frame_w
-            y_start = lower_half_start + r * row_height
-            y_end = lower_half_start + (r + 1) * row_height if r < num_rows - 1 else frame_h
+            x_start = int(c * part_width)
+            x_end = int((c + 1) * part_width) if c < num_parts - 1 else frame_w
+            y_start = int(vis_lower_half_start + r * vis_row_height)
+            y_end = int(vis_lower_half_start + (r + 1) * vis_row_height) if r < num_rows - 1 else frame_h
 
             if r == num_rows - 1 and c == yellow_col:
-                overlay_color, alpha = (0, 255, 255), 0.85
-            elif c == path_cols[r]:
-                overlay_color, alpha = (0, 200, 0), 0.15
+                overlay_color, alpha = (0, 255, 255), 0.85  # yellow = vehicle current lane
+            elif c == display_path_cols[r]:
+                overlay_color, alpha = (0, 200, 0), 0.15    # planned tile (smoothed)
             else:
                 overlay_color, alpha = (0, 0, 255), 0.06
 
@@ -301,41 +374,40 @@ while True:
             cv2.rectangle(rect_layer, (x_start, y_start), (x_end, y_end), overlay_color, -1)
             processed = cv2.addWeighted(rect_layer, alpha, processed, 1 - alpha, 0)
 
-            cv2.putText(processed, f"{smoothed_damages[r, c]:.2f}%", (x_start + 10, y_start + 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+    # Draw yellow tile strictly on the discrete yellow_col (fix for the double-tile bug)
+    display_col = int(np.clip(yellow_col, 0, num_parts - 1))   # IMPORTANT: use yellow_col not rounding
+    x0 = int(display_col * part_width)
+    x1 = int((display_col + 1) * part_width) if display_col < num_parts - 1 else frame_w
+    y0 = int(vis_lower_half_start + (num_rows - 1) * vis_row_height)
+    y1 = frame_h
+    rect_layer = processed.copy()
+    cv2.rectangle(rect_layer, (x0, y0), (x1, y1), (0, 255, 255), -1)
+    processed = cv2.addWeighted(rect_layer, 0.85, processed, 0.15, 0)
 
-    # Draw smooth spline for current ema_path_x
-    try:
-        if len(ema_path_x) >= 3:
-            k = min(3, len(ema_path_x) - 1)
-            spline = make_interp_spline(y_centers, ema_path_x, k=k)
-            ys = np.linspace(y_centers.min(), y_centers.max(), 200)
-            xs = spline(ys)
-            pts = np.array(list(zip(xs, ys)), np.int32).reshape((-1, 1, 2))
-            cv2.polylines(processed, [pts], False, (0, 255, 0), 4, lineType=cv2.LINE_AA)
-        else:
-            pts = np.array(list(zip(ema_path_x, y_centers)), np.int32).reshape((-1, 1, 2))
-            cv2.polylines(processed, [pts], False, (0, 255, 0), 4, lineType=cv2.LINE_AA)
-    except Exception:
-        pass
+    # Draw yellow trail
+    for hx, hy in yellow_history[-60:]:
+        cv2.circle(processed, (hx, hy), 3, (0, 200, 200), -1, lineType=cv2.LINE_AA)
 
-    # Draw small indicator and planned immediate sequence (for debugging)
-    cv2.putText(processed, f"Frame: {frame_idx}  Yellow col: {yellow_col}  Recommended: {recommended_col}",
-                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    # HUD text removed
+    # cv2.putText(...)
+    # seq_text = ...
+    # cv2.putText(...)
 
-    # Optionally show planned sequence for next horizon on the bottom row
-    seq_text = "Planned: " + ",".join(str(x) for x in planned_seq[:min(len(planned_seq), 10)])
-    cv2.putText(processed, seq_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1, cv2.LINE_AA)
+    # ROI guide/virtual lines
+    cv2.line(processed, (0, roi_top), (frame_w - 1, roi_top), (255, 255, 0), 1)
+    roi_h = roi.shape[0]
+    y_far = roi_top + int(roi_h * LINE_FAR_FRAC)
+    y_near = roi_top + int(roi_h * LINE_NEAR_FRAC)
+    cv2.line(processed, (0, y_far), (frame_w - 1, y_far), (255, 200, 0), 1)
+    cv2.line(processed, (0, y_near), (frame_w - 1, y_near), (255, 200, 0), 1)
 
-    cv2.imshow("Live Heatmap + MPC Yellow Path", processed)
+    cv2.imshow("Live Heatmap + Danger-Aware Pathing", processed)
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
-    # small controlled sleep to match FPS (if reading from file, remove)
     now = time.time()
     elapsed = now - prev_time
     prev_time = now
-    # don't block if camera; just continue
 
 cap.release()
-cv2.destroyAllWindows() 
+cv2.destroyAllWindows()
