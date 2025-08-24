@@ -56,7 +56,7 @@ Open app.py and make modifications in line 11
 ### Run on a Video File
 
 ```bash
-VIDEO_SOURCE = "your video source path"
+VIDEO_SOURCE = "your video file path"
 ```
 
 ### Run on Live Camera
@@ -80,6 +80,6 @@ VIDEO_SOURCE = 0
 ## 🔮 Future Improvements
 
 - 📍 GPS integration for real-world navigation
-- 🚗 Lane-aware planning
+- 🚗 Lane aware planning
 - 🧠 Adaptive smoothing based on vehicle dynamics
 - 📱 Android auto and Apple car app deployment with dashcam integration
